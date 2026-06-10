@@ -1,3 +1,4 @@
+using Amazon.Lambda.APIGatewayEvents;
 using Amazon.Lambda.Core;
 using Amazon.SecretsManager;
 using Amazon.SecretsManager.Model;
@@ -8,50 +9,64 @@ using System.Text.Json;
 
 [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
 
+namespace LambdaSegundaPractica;
+
 public class Function
 {
-    private const string deploymentName = "conciertos-bot";
+    private const string SecretName = "ai-foundry-secrets";
 
-    public async Task<string> FunctionHandler(dynamic input, ILambdaContext context)
+    public async Task<string> FunctionHandler(APIGatewayProxyRequest request, ILambdaContext context)
     {
-        string question = input?.question;
+        try
+        {
+            context.Logger.LogInformation("BODY: " + request.Body);
 
-        if (string.IsNullOrEmpty(question))
-            return "No question provided";
+            if (string.IsNullOrWhiteSpace(request.Body))
+                return "ERROR: body vacío";
 
-        // 🔐 1. Obtener secretos
-        var secrets = await GetSecrets();
+            var bodyJson = JsonSerializer.Deserialize<JsonElement>(request.Body);
 
-        string endpoint = secrets["endpoint"];
-        string apiKey = secrets["apiKey"];
+            if (!bodyJson.TryGetProperty("question", out var q))
+                return "ERROR: no viene question";
 
-        // 🤖 2. Cliente IA
-        var client = new ChatClient(
-            credential: new ApiKeyCredential(apiKey),
-            model: deploymentName,
-            options: new OpenAIClientOptions
-            {
-                Endpoint = new Uri(endpoint)
-            });
+            string question = q.GetString();
 
-        // 💬 3. Pregunta a la IA
-        var completion = client.CompleteChat([
-            new SystemChatMessage("Eres un asistente experto en conciertos y eventos musicales."),
-            new UserChatMessage(question)
-        ]);
+            var (endpoint, apiKey) = await GetSecretsAsync();
 
-        return completion.Value.Content[0].Text;
+            ChatClient client = new(
+                credential: new ApiKeyCredential(apiKey),
+                model: "gpt-4.1",
+                options: new OpenAIClientOptions()
+                {
+                    Endpoint = new Uri(endpoint)
+                });
+
+            ChatCompletion completion = await client.CompleteChatAsync(
+            [
+                new SystemChatMessage("Eres un ayudante para un examen de programación"),
+                new UserChatMessage(question),
+            ]);
+
+            return string.Concat(completion.Content.Select(c => c.Text));
+        }
+        catch (Exception ex)
+        {
+            context.Logger.LogError(ex.ToString());
+            return "ERROR INTERNO: " + ex.Message;
+        }
     }
 
-    private async Task<Dictionary<string, string>> GetSecrets()
+    private async Task<(string endpoint, string apiKey)> GetSecretsAsync()
     {
         var client = new AmazonSecretsManagerClient();
 
         var response = await client.GetSecretValueAsync(new GetSecretValueRequest
         {
-            SecretId = "ai-foundry-secrets"
+            SecretId = SecretName
         });
 
-        return JsonSerializer.Deserialize<Dictionary<string, string>>(response.SecretString);
+        var json = JsonSerializer.Deserialize<Dictionary<string, string>>(response.SecretString);
+
+        return (json["endpoint"], json["apiKey"]);
     }
 }
